@@ -93,7 +93,9 @@ output_name = session.get_outputs()[0].name
 gc.collect()
 
 TARGET_IDS = list(COCO_IDS.keys())
-print(f"[Detector]: Loaded ONNX Runtime successfully. Target IDs: {TARGET_IDS}")
+# In YOLO output, columns 0..3 are cx, cy, w, h. The 80 classes start at column 4!
+TARGET_COLS = [4 + cid for cid in TARGET_IDS]
+print(f"[Detector]: Loaded ONNX Runtime successfully. Target IDs: {TARGET_IDS}, Target Columns: {TARGET_COLS}")
 print(f"[Detector]: Thresholds: conf={CONF_THRESHOLD}, min_area={MIN_AREA_RATIO}, imgsz={IMGSZ}, iou={IOU_THRESHOLD}")
 
 def _nms(boxes, scores, iou_thresh):
@@ -156,9 +158,9 @@ def detect(image, conf=CONF_THRESHOLD, min_area=MIN_AREA_RATIO, imgsz=IMGSZ, iou
     out = session.run([output_name], {input_name: blob})[0]
     preds = out[0].T  # Transpose [84, 8400] -> [8400, 84]
 
-    # 4. Filter scores for target classes
-    scores_target = preds[:, TARGET_IDS]
-    max_idx = np.argmax(scores_target, axis=1)
+    # 4. Filter scores for target classes (Columns 0..3 are box coords; classes start at index 4)
+    scores_target = preds[:, TARGET_COLS]
+    max_subidx = np.argmax(scores_target, axis=1)
     max_scores = np.max(scores_target, axis=1)
 
     mask = max_scores >= conf
@@ -167,7 +169,7 @@ def detect(image, conf=CONF_THRESHOLD, min_area=MIN_AREA_RATIO, imgsz=IMGSZ, iou
 
     filtered_preds = preds[mask]
     filtered_scores = max_scores[mask]
-    filtered_cls = np.array(TARGET_IDS)[max_idx[mask]]
+    filtered_cls = np.array(TARGET_IDS)[max_subidx[mask]]
 
     # 5. Decode box coordinates (cx, cy, w, h) -> undo letterbox to original pixels
     cx = filtered_preds[:, 0]
