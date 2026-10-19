@@ -1,0 +1,17 @@
+{
+  "classes": {
+    "cell phone": "mobile",
+    "laptop": "laptop",
+    "tv": "tv"
+  },
+  "coco_ids": {
+    "tv": 62,
+    "laptop": 63,
+    "cell phone": 67
+  },
+  "thresholds": {
+    "confidence": 0.4,
+    "min_area_ratio": 0.01,
+    "iou": 0.7
+  }
+}
