@@ -80,11 +80,12 @@ print(f"[Detector]: Loading ONNX model with ultra-low memory footprint from {MOD
 
 # Configure ONNX Runtime to minimize RAM usage for 512MB environments
 session_options = ort.SessionOptions()
-session_options.enable_cpu_mem_arena = False  # Disable memory arena pre-allocation (saves ~100MB RAM)
+session_options.enable_cpu_mem_arena = False  # Disable memory arena pre-allocation
+session_options.enable_memory_pattern = False  # Disable tensor memory pattern pre-allocation
 session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
 session_options.intra_op_num_threads = 1
 session_options.inter_op_num_threads = 1
-session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
 
 session = ort.InferenceSession(str(MODEL_PATH), session_options, providers=["CPUExecutionProvider"])
 input_name = session.get_inputs()[0].name

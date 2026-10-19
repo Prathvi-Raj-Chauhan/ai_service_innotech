@@ -1,7 +1,7 @@
+import os
 import sys
 import json
 import requests
-import os
 
 SERVER_URL = os.environ.get("SERVER_URL", "https://ai-service-innotech.onrender.com")
 
@@ -18,9 +18,12 @@ def test_predict(image_path):
     try:
         with open(image_path, "rb") as f:
             files = {"file": f}
-            res = requests.post(f"{SERVER_URL}/predict", files=files, timeout=30)
+            res = requests.post(f"{SERVER_URL}/predict", files=files, timeout=90)
             print(f"[Prediction Status]: {res.status_code}")
-            print(json.dumps(res.json(), indent=2))
+            try:
+                print(json.dumps(res.json(), indent=2))
+            except Exception:
+                print(res.text)
     except Exception as e:
         print(f"[Prediction Failed]: {e}")
 
