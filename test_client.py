@@ -1,8 +1,9 @@
 import sys
 import json
 import requests
+import os
 
-SERVER_URL = "http://localhost:8000"
+SERVER_URL = os.environ.get("SERVER_URL", "https://ai-service-innotech.onrender.com")
 
 def test_health():
     try:

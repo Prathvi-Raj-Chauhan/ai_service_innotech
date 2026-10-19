@@ -2,7 +2,7 @@ import io
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, ImageOps
-from detector import detect, LABELS, IDS, CONF_THRESHOLD, MIN_AREA_RATIO, IOU_THRESHOLD
+from detector import detect, LABELS, IDS, CONF_THRESHOLD, MIN_AREA_RATIO, IMGSZ, IOU_THRESHOLD
 
 app = FastAPI(
     title="Innotech E-Waste Photo Detector API",
@@ -41,6 +41,7 @@ def get_labels():
     return {
         "classes": LABELS,
         "ids": IDS,
+        "imgsz": IMGSZ,
         "thresholds": {
             "confidence": CONF_THRESHOLD,
             "min_area_ratio": MIN_AREA_RATIO,
