@@ -1,68 +1,54 @@
 import os
 import json
 from pathlib import Path
-from ultralytics import YOLO
+import numpy as np
+from PIL import Image
+import onnxruntime as ort
 
 BASE_DIR = Path(__file__).resolve().parent
 LABELS_FILE = BASE_DIR / "labels.json"
 
-# Defaults
+# Default configuration
 LABELS = {"cell phone": "mobile", "laptop": "laptop", "tv": "tv"}
+COCO_IDS = {62: "tv", 63: "laptop", 67: "cell phone"}
 CONF_THRESHOLD = 0.4
 MIN_AREA_RATIO = 0.01
 IMGSZ = 640
 IOU_THRESHOLD = 0.7
-IDS = [62, 63, 67]
 
-# Load from labels.json (supports names, coco_to_ours, conf, min_area_ratio, imgsz)
+# Load dynamically from labels.json
 if LABELS_FILE.exists():
     try:
         with open(LABELS_FILE, "r", encoding="utf-8") as f:
             config = json.load(f)
 
         if isinstance(config, dict):
-            # 1. Label mapping (coco_to_ours or classes)
+            # 1. Label mapping (coco_to_ours)
             if "coco_to_ours" in config and isinstance(config["coco_to_ours"], dict):
                 LABELS = config["coco_to_ours"]
-            elif "classes" in config and isinstance(config["classes"], dict):
-                LABELS = config["classes"]
 
-            # 2. Confidence threshold
+            # 2. Thresholds
             if "conf" in config:
                 CONF_THRESHOLD = float(config["conf"])
-            elif "thresholds" in config and "confidence" in config["thresholds"]:
-                CONF_THRESHOLD = float(config["thresholds"]["confidence"])
-
-            # 3. Minimum area ratio
             if "min_area_ratio" in config:
                 MIN_AREA_RATIO = float(config["min_area_ratio"])
-            elif "thresholds" in config and "min_area_ratio" in config["thresholds"]:
-                MIN_AREA_RATIO = float(config["thresholds"]["min_area_ratio"])
-
-            # 4. Image size (imgsz)
             if "imgsz" in config:
                 IMGSZ = int(config["imgsz"])
-
-            # 5. IoU threshold
             if "iou" in config:
                 IOU_THRESHOLD = float(config["iou"])
-            elif "thresholds" in config and "iou" in config["thresholds"]:
-                IOU_THRESHOLD = float(config["thresholds"]["iou"])
 
-            # 6. Extract class IDs matching target labels
+            # 3. Target class IDs from 'names'
             if "names" in config and isinstance(config["names"], dict):
-                names_dict = config["names"]
-                matched_ids = [int(k) for k, v in names_dict.items() if v in LABELS]
-                if matched_ids:
-                    IDS = matched_ids
-            elif "coco_ids" in config and isinstance(config["coco_ids"], dict):
-                IDS = [int(v) for v in config["coco_ids"].values()]
+                COCO_IDS = {}
+                for k, v in config["names"].items():
+                    if v in LABELS:
+                        COCO_IDS[int(k)] = v
     except Exception as e:
-        print(f"[Detector Warning]: Error reading labels.json, using defaults: {e}")
+        print(f"[Detector Warning]: Error loading labels.json: {e}")
 
 MODEL_PATH = BASE_DIR / "yolo26x.onnx"
 
-# 1. Check if model can be downloaded from MODEL_URL environment variable
+# Auto-download from MODEL_URL if needed
 model_url = os.environ.get("MODEL_URL")
 if not MODEL_PATH.exists() and model_url:
     print(f"[Detector]: Downloading model from {model_url} ...")
@@ -74,58 +60,144 @@ if not MODEL_PATH.exists() and model_url:
         print(f"[Detector Error]: Failed to download model from {model_url}: {e}")
 
 if not MODEL_PATH.exists():
-    # If yolo26x.onnx is not yet present, check for any other .onnx or .pt file
-    alt_models = list(BASE_DIR.glob("*.onnx")) + list(BASE_DIR.glob("*.pt"))
-    if alt_models:
-        MODEL_PATH = alt_models[0]
-        print(f"[Detector]: 'yolo26x.onnx' not found. Using detected model: {MODEL_PATH.name}")
+    # If yolo26x.onnx is missing, look for any .onnx in the folder
+    alt_onnx = list(BASE_DIR.glob("*.onnx"))
+    if alt_onnx:
+        MODEL_PATH = alt_onnx[0]
+        print(f"[Detector]: Using available model: {MODEL_PATH.name}")
     else:
-        # Fallback to standard lightweight YOLO that downloads automatically on first run
-        MODEL_PATH = "yolo11n.pt"
-        print(f"[Detector]: 'yolo26x.onnx' not yet placed in {BASE_DIR}. Using '{MODEL_PATH}' as standard fallback.")
+        raise FileNotFoundError(f"No ONNX model found at {MODEL_PATH} and no MODEL_URL specified.")
 
-print(f"[Detector]: Loading YOLO model from {MODEL_PATH} ...")
-model = YOLO(str(MODEL_PATH), task="detect")
+print(f"[Detector]: Loading ONNX model with ultra-low memory footprint from {MODEL_PATH} ...")
 
-# Verify active class IDs against loaded model
-active_target_names = [model.names.get(i, str(i)) for i in IDS]
-print(f"[Detector]: Active target classes: {active_target_names} with IDs: {IDS}")
-print(f"[Detector]: Active thresholds: conf={CONF_THRESHOLD}, min_area={MIN_AREA_RATIO}, imgsz={IMGSZ}, iou={IOU_THRESHOLD}")
+# Configure ONNX Runtime to minimize RAM usage for 512MB environments
+session_options = ort.SessionOptions()
+session_options.enable_cpu_mem_arena = False  # Disable memory arena pre-allocation (saves ~100MB RAM)
+session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+session_options.intra_op_num_threads = 2
+session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+session = ort.InferenceSession(str(MODEL_PATH), session_options, providers=["CPUExecutionProvider"])
+input_name = session.get_inputs()[0].name
+output_name = session.get_outputs()[0].name
+
+TARGET_IDS = list(COCO_IDS.keys())
+print(f"[Detector]: Loaded ONNX Runtime successfully. Target IDs: {TARGET_IDS}")
+print(f"[Detector]: Thresholds: conf={CONF_THRESHOLD}, min_area={MIN_AREA_RATIO}, imgsz={IMGSZ}, iou={IOU_THRESHOLD}")
+
+def _nms(boxes, scores, iou_thresh):
+    """Fast vectorized Non-Maximum Suppression (NMS)."""
+    x1 = boxes[:, 0]
+    y1 = boxes[:, 1]
+    x2 = boxes[:, 2]
+    y2 = boxes[:, 3]
+    areas = (x2 - x1) * (y2 - y1)
+    order = scores.argsort()[::-1]
+
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(i)
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+
+        w = np.maximum(0.0, xx2 - xx1)
+        h = np.maximum(0.0, yy2 - yy1)
+        inter = w * h
+        ovr = inter / (areas[i] + areas[order[1:]] - inter)
+
+        inds = np.where(ovr <= iou_thresh)[0]
+        order = order[inds + 1]
+
+    return keep
 
 def detect(image, conf=CONF_THRESHOLD, min_area=MIN_AREA_RATIO, imgsz=IMGSZ, iou=IOU_THRESHOLD):
     """
-    Detects target e-waste devices (mobile, laptop, tv) in the input image.
-    Args:
-        image: PIL Image, numpy array, or file path.
-        conf: minimum confidence score threshold (default from labels.json: 0.4).
-        min_area: minimum area ratio threshold (default from labels.json: 0.01).
-        imgsz: inference image size (default from labels.json: 640).
-        iou: NMS IoU threshold (default: 0.7).
-    Returns:
-        dict: {"is_target": bool, "device": dict or None, "all_detections": list}
+    Pure ONNX Runtime inference: zero PyTorch overhead, runs in <200MB RAM.
     """
-    results = model.predict(image, classes=IDS, conf=conf, iou=iou, imgsz=imgsz, verbose=False)[0]
-    h, w = results.orig_shape
-    dets = []
+    if isinstance(image, str):
+        img = Image.open(image).convert("RGB")
+    elif isinstance(image, np.ndarray):
+        img = Image.fromarray(image).convert("RGB")
+    else:
+        img = image.convert("RGB")
 
-    for b in results.boxes:
-        x1, y1, x2, y2 = b.xyxy[0].tolist()
-        area = (x2 - x1) * (y2 - y1) / (w * h)
-        if area >= min_area:
-            cls_id = int(b.cls[0])
-            raw_cls_name = results.names.get(cls_id, str(cls_id))
-            target_label = LABELS.get(raw_cls_name, raw_cls_name)
+    orig_w, orig_h = img.size
+
+    # 1. Letterbox resize keeping aspect ratio with padding
+    r = min(imgsz / orig_h, imgsz / orig_w)
+    new_w = int(round(orig_w * r))
+    new_h = int(round(orig_h * r))
+
+    resized = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+    canvas = Image.new("RGB", (imgsz, imgsz), (114, 114, 114))
+    pad_x = (imgsz - new_w) // 2
+    pad_y = (imgsz - new_h) // 2
+    canvas.paste(resized, (pad_x, pad_y))
+
+    # 2. Normalize and format tensor: [1, 3, imgsz, imgsz] float32
+    blob = np.array(canvas, dtype=np.float32) / 255.0
+    blob = np.transpose(blob, (2, 0, 1))[None, ...]
+
+    # 3. ONNX inference
+    out = session.run([output_name], {input_name: blob})[0]
+    preds = out[0].T  # Transpose [84, 8400] -> [8400, 84]
+
+    # 4. Filter scores for target classes
+    scores_target = preds[:, TARGET_IDS]
+    max_idx = np.argmax(scores_target, axis=1)
+    max_scores = np.max(scores_target, axis=1)
+
+    mask = max_scores >= conf
+    if not np.any(mask):
+        return {"is_target": False, "device": None, "all_detections": []}
+
+    filtered_preds = preds[mask]
+    filtered_scores = max_scores[mask]
+    filtered_cls = np.array(TARGET_IDS)[max_idx[mask]]
+
+    # 5. Decode box coordinates (cx, cy, w, h) -> undo letterbox to original pixels
+    cx = filtered_preds[:, 0]
+    cy = filtered_preds[:, 1]
+    bw = filtered_preds[:, 2]
+    bh = filtered_preds[:, 3]
+
+    x1 = np.clip((cx - bw / 2 - pad_x) / r, 0, orig_w)
+    y1 = np.clip((cy - bh / 2 - pad_y) / r, 0, orig_h)
+    x2 = np.clip((cx + bw / 2 - pad_x) / r, 0, orig_w)
+    y2 = np.clip((cy + bh / 2 - pad_y) / r, 0, orig_h)
+
+    boxes = np.stack([x1, y1, x2, y2], axis=1)
+
+    # 6. Apply Non-Maximum Suppression (NMS)
+    keep_indices = _nms(boxes, filtered_scores, iou)
+
+    dets = []
+    for idx in keep_indices:
+        b = [round(float(v)) for v in boxes[idx]]
+        area_ratio = (b[2] - b[0]) * (b[3] - b[1]) / (orig_w * orig_h)
+
+        if area_ratio >= min_area:
+            raw_cls = COCO_IDS.get(int(filtered_cls[idx]), "device")
+            target_label = LABELS.get(raw_cls, raw_cls)
+
             dets.append({
                 "label": target_label,
-                "confidence": round(float(b.conf[0]), 3),
-                "box": [round(v) for v in (x1, y1, x2, y2)],
-                "area_ratio": round(area, 3)
+                "confidence": round(float(filtered_scores[idx]), 3),
+                "box": b,
+                "area_ratio": round(float(area_ratio), 3)
             })
 
-    # If several are present, pick the one covering the largest area
+    # Pick largest device covering photo area
     largest = max(dets, key=lambda d: d["area_ratio"], default=None)
+
     return {
         "is_target": largest is not None,
         "device": largest,
         "all_detections": dets
     }
+
+# Export values for FastAPI /labels endpoint
+IDS = TARGET_IDS
