@@ -51,10 +51,17 @@ MODEL_PATH = BASE_DIR / "yolo26x.onnx"
 # Auto-download from MODEL_URL if needed
 model_url = os.environ.get("MODEL_URL")
 if not MODEL_PATH.exists() and model_url:
-    print(f"[Detector]: Downloading model from {model_url} ...")
+    print(f"[Detector]: Downloading model in low-memory stream from {model_url} ...")
     try:
         import urllib.request
-        urllib.request.urlretrieve(model_url, MODEL_PATH)
+        import gc
+        with urllib.request.urlopen(model_url) as response, open(MODEL_PATH, "wb") as out_file:
+            while True:
+                chunk = response.read(65536)
+                if not chunk:
+                    break
+                out_file.write(chunk)
+        gc.collect()
         print(f"[Detector]: Model downloaded successfully to {MODEL_PATH}")
     except Exception as e:
         print(f"[Detector Error]: Failed to download model from {model_url}: {e}")
@@ -74,12 +81,14 @@ print(f"[Detector]: Loading ONNX model with ultra-low memory footprint from {MOD
 session_options = ort.SessionOptions()
 session_options.enable_cpu_mem_arena = False  # Disable memory arena pre-allocation (saves ~100MB RAM)
 session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-session_options.intra_op_num_threads = 2
-session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+session_options.intra_op_num_threads = 1
+session_options.inter_op_num_threads = 1
+session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
 
 session = ort.InferenceSession(str(MODEL_PATH), session_options, providers=["CPUExecutionProvider"])
 input_name = session.get_inputs()[0].name
 output_name = session.get_outputs()[0].name
+gc.collect()
 
 TARGET_IDS = list(COCO_IDS.keys())
 print(f"[Detector]: Loaded ONNX Runtime successfully. Target IDs: {TARGET_IDS}")
